@@ -66,7 +66,11 @@ only hold the hooks that call into it.
    `Window` methods, and `DynamicTexture::new_gpu`, `id` and `remove` for
    renderer crates. The wgpu crate adds an
    owning GPU texture type and its context constructor under the same
-   `fast::dynamic_textures` exception. Everything else is `pub(crate)`, and the
+   `fast::dynamic_textures` exception. The Windows crate likewise exports
+   `DirectXDynamicTexture` under this exception: an owner of a same-device
+   render target, a device accessor, size/current-device checks, and render/paint
+   methods. Its producer uses an isolated deferred context. See
+   [GPU viewports](gpu-viewport.md). Everything else is `pub(crate)`, and the
    module adds no rendering behavior an app could observe without calling the
    new methods.
    A second exception is `WebPlatform::wgpu_context()` (in

@@ -34,6 +34,10 @@ name = "native_webview"
 required-features = ["fast"]
 
 [[example]]
+name = "gpu_gallery"
+required-features = ["fast"]
+
+[[example]]
 name = "linux_webview"
 required-features = ["fast"]
 
@@ -77,6 +81,9 @@ cocoa.workspace = true
 objc.workspace = true
 
 [target.'cfg(target_os = "windows")'.dev-dependencies]
+gpui_windows.workspace = true
+tobj = { version = "4", default-features = false }
+image.workspace = true
 # 0.39 rather than zed-industries/zed#62379's 0.38, which is built on windows
 # 0.61: gpui_windows hands out windows 0.62's `IUnknown`.
 webview2-com = "0.39"

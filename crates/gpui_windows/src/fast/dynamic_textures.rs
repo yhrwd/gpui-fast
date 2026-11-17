@@ -17,20 +17,21 @@
 //! recovers from a lost device; textures are then recreated on their next
 //! upload instead of being handed a stale pointer.
 
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, marker::PhantomData, rc::Rc, sync::Arc};
 
 use anyhow::{Context as _, Result};
 use gpui::{
-    AtlasTextureId, Bounds, DevicePixels, DynamicTextureId, DynamicTexturePlatform, Size,
-    set_dynamic_texture_platform,
+    AtlasTextureId, Bounds, DevicePixels, DynamicTexture, DynamicTextureId, DynamicTexturePlatform,
+    Pixels, Size, Window, set_dynamic_texture_platform,
 };
 use parking_lot::{Mutex, RwLock};
 use windows::Win32::Graphics::{
     Direct3D11::{
-        D3D11_BIND_SHADER_RESOURCE, D3D11_BOX, D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT,
-        ID3D11Device, ID3D11DeviceContext, ID3D11ShaderResourceView, ID3D11Texture2D,
+        D3D11_BIND_RENDER_TARGET, D3D11_BIND_SHADER_RESOURCE, D3D11_BOX, D3D11_TEXTURE2D_DESC,
+        D3D11_USAGE_DEFAULT, ID3D11Device, ID3D11DeviceContext, ID3D11RenderTargetView,
+        ID3D11ShaderResourceView, ID3D11Texture2D,
     },
-    Dxgi::Common::*,
+    Dxgi::Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC},
 };
 
 /// BGRA8, matching the scene's polychrome sprite format.
@@ -157,6 +158,18 @@ impl DynamicTexturePlatform for DirectXDynamicTextures {
 }
 
 fn create_texture_2d(device: &ID3D11Device, size: Size<DevicePixels>) -> Result<ID3D11Texture2D> {
+    create_texture_with_flags(device, size, D3D11_BIND_SHADER_RESOURCE.0 as u32)
+}
+
+fn create_texture_with_flags(
+    device: &ID3D11Device,
+    size: Size<DevicePixels>,
+    flags: u32,
+) -> Result<ID3D11Texture2D> {
+    anyhow::ensure!(
+        size.width.0 > 0 && size.height.0 > 0 && size.width.0 <= 16384 && size.height.0 <= 16384,
+        "dynamic texture size must be within 1..=16384 pixels"
+    );
     let desc = D3D11_TEXTURE2D_DESC {
         Width: size.width.0.max(0) as u32,
         Height: size.height.0.max(0) as u32,
@@ -168,7 +181,7 @@ fn create_texture_2d(device: &ID3D11Device, size: Size<DevicePixels>) -> Result<
             Quality: 0,
         },
         Usage: D3D11_USAGE_DEFAULT,
-        BindFlags: D3D11_BIND_SHADER_RESOURCE.0 as u32,
+        BindFlags: flags,
         CPUAccessFlags: 0,
         MiscFlags: 0,
     };
@@ -237,3 +250,177 @@ fn upload(
     }
     Ok(())
 }
+
+/// A GPU render target sampled by GPUI's ordinary sprite pipeline, on the
+/// Windows renderer's own D3D11 device. No staging, readback, shared handles,
+/// image encoding or second graphics device is involved.
+///
+/// Create after opening a GPUI window. Use `device()` to create producer
+/// resources. `render` records commands on a private deferred context, then
+/// executes them on GPUI's immediate context with its state restored. All
+/// producer bindings must be set each frame. Output must be premultiplied
+/// BGRA8 UNORM, like GPUI's existing dynamic textures (opaque alpha is fine).
+///
+/// The owner is deliberately neither Send nor Sync. Render on the window
+/// thread, during paint or an update. After device recovery, `is_current()`
+/// becomes false: recreate the owner AND all resources made with its device.
+/// Resize by replacing the owner; do not stretch an old target after DPI changes.
+/// As with WgpuDynamicTexture, notify other windows displaying this target.
+/// Raw COM operations in the producer remain subject to D3D11's safety rules.
+pub struct DirectXDynamicTexture {
+    platform: Arc<DirectXDynamicTextures>,
+    texture: DynamicTexture,
+    size: Size<DevicePixels>,
+    device: ID3D11Device,
+    deferred: ID3D11DeviceContext,
+    target: ID3D11RenderTargetView,
+    _window_thread: PhantomData<Rc<()>>,
+}
+
+impl DirectXDynamicTexture {
+    /// Allocates on the already initialized Windows platform device.
+    pub fn new(_window: &mut Window, size: Size<DevicePixels>) -> Result<Self> {
+        let platform = PLATFORM
+            .read()
+            .clone()
+            .context("open a GPUI window before creating a GPU texture")?;
+        Self::create(platform, size)
+    }
+
+    fn create(platform: Arc<DirectXDynamicTextures>, size: Size<DevicePixels>) -> Result<Self> {
+        let device = platform.gpu.read().0.clone();
+        let target = create_texture_with_flags(
+            &device,
+            size,
+            (D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET).0 as u32,
+        )?;
+        let view = create_view(&device, &target)?;
+        let mut render_target = None;
+        let mut deferred = None;
+        unsafe {
+            device.CreateRenderTargetView(&target, None, Some(&mut render_target))?;
+            device.CreateDeferredContext(0, Some(&mut deferred))?;
+        }
+        let target_view = render_target.context("creating GPU render target")?;
+        let deferred = deferred.context("creating deferred GPU context")?;
+        // Allocate metadata last so a failed D3D allocation cannot leak an id.
+        let texture = DynamicTexture::new_gpu(size)?;
+        platform.textures.lock().insert(
+            texture.id().atlas_texture_id().index,
+            Entry {
+                size,
+                gpu: Some((target, view)),
+            },
+        );
+        let owner = Self {
+            platform,
+            texture,
+            size,
+            device,
+            deferred,
+            target: target_view,
+            _window_thread: PhantomData,
+        };
+        owner.record(|context, target| {
+            unsafe {
+                context.ClearRenderTargetView(target, &[0.; 4]);
+            }
+            Ok(())
+        })?;
+        Ok(owner)
+    }
+
+    /// Device for creating shaders, vertex/index buffers and depth targets.
+    pub fn device(&self) -> &ID3D11Device {
+        &self.device
+    }
+
+    /// Physical dimensions; recreate when the element's scaled size changes.
+    pub fn size(&self) -> Size<DevicePixels> {
+        self.size
+    }
+
+    /// False after GPUI replaces its graphics device. Recreate producer state.
+    pub fn is_current(&self) -> bool {
+        self.platform.gpu.read().0 == self.device
+    }
+
+    /// Records and submits a complete frame, then invalidates GPUI's cached
+    /// content. A callback error discards the recording without submitting it.
+    /// No CPU/GPU synchronization is performed. Do not retain or submit work
+    /// on the deferred context outside this callback, or recurse into GPUI.
+    pub fn render<T>(
+        &self,
+        window: &mut Window,
+        render: impl FnOnce(&ID3D11DeviceContext, &ID3D11RenderTargetView) -> Result<T>,
+    ) -> Result<T> {
+        let result = self.record(render)?;
+        window.refresh_dynamic_texture(self.texture)?;
+        Ok(result)
+    }
+
+    fn record<T>(
+        &self,
+        render: impl FnOnce(&ID3D11DeviceContext, &ID3D11RenderTargetView) -> Result<T>,
+    ) -> Result<T> {
+        let gpu = self.platform.gpu.read();
+        anyhow::ensure!(
+            gpu.0 == self.device,
+            "GPU texture device was replaced; recreate the texture and producer resources"
+        );
+        let mut recording = Recording {
+            context: &self.deferred,
+            finished: false,
+        };
+        let result = render(&self.deferred, &self.target);
+        let mut commands = None;
+        // FALSE resets the deferred context, including its recording, on both
+        // success and failure. TRUE on execution preserves GPUI's bindings and
+        // unbinds the producer's render target before GPUI samples it as an SRV.
+        unsafe {
+            self.deferred
+                .FinishCommandList(false, Some(&mut commands))?;
+        }
+        recording.finished = true;
+        let result = result?;
+        let commands = commands.context("recording GPU viewport commands")?;
+        unsafe {
+            gpu.1.ExecuteCommandList(&commands, true);
+        }
+        Ok(result)
+    }
+
+    /// Call during paint; clipping, opacity and painter order belong to GPUI.
+    pub fn paint(&self, window: &mut Window, bounds: Bounds<Pixels>) -> Result<()> {
+        anyhow::ensure!(self.is_current(), "GPU texture device was replaced");
+        window.paint_dynamic_texture(bounds, self.texture)
+    }
+}
+
+impl Drop for DirectXDynamicTexture {
+    fn drop(&mut self) {
+        self.platform
+            .textures
+            .lock()
+            .remove(&self.texture.id().atlas_texture_id().index);
+        self.texture.remove();
+    }
+}
+
+// A panicking producer must not leave commands in the next frame's recording.
+struct Recording<'a> {
+    context: &'a ID3D11DeviceContext,
+    finished: bool,
+}
+impl Drop for Recording<'_> {
+    fn drop(&mut self) {
+        if !self.finished {
+            let mut discarded = None;
+            let _ = unsafe { self.context.FinishCommandList(false, Some(&mut discarded)) };
+        }
+    }
+}
+
+#[cfg(test)]
+#[path = "dynamic_textures/gpu_tests.rs"]
+mod gpu_tests;

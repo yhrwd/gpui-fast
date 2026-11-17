@@ -43,3 +43,5 @@ pub(crate) use wrapper::*;
 pub use platform::WindowsPlatform;
 
 pub(crate) use windows::Win32::Foundation::HWND;
+
+pub use fast::dynamic_textures::DirectXDynamicTexture;
