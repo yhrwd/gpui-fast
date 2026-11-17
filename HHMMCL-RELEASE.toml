@@ -1,0 +1,7 @@
+source_repository = "https://github.com/yhrwd/gpui-fast"
+source_branch = "hhmmcl/gpu-viewport"
+source_revision = "aa50f04dece8e1f14e63f72e496b9271ab9597bc"
+upstream_release = "v0.1.17"
+release_preparation = "script/prepare-release.ts --tag v0.1.17"
+snapshot_version = "0.3.12"
+wgpu_version = "30.0.1"
