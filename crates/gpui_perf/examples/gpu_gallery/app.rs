@@ -9,28 +9,50 @@ use windows::Win32::Graphics::Direct3D11::ID3D11DepthStencilView;
 #[path = "renderer.rs"]
 mod renderer;
 use renderer::Renderer;
+#[path = "motion.rs"]
+mod motion;
+#[path = "studies.rs"]
+mod studies;
+use motion::{Motion, Page};
 
-actions!(gpu_gallery, [TogglePlayback, ResetCamera]);
+actions!(
+    gpu_gallery,
+    [
+        TogglePlayback,
+        ResetCamera,
+        ShowScenes,
+        ShowCnc,
+        ShowFlat,
+        Primary,
+        Previous,
+        Next
+    ]
+);
 struct Panel {
     target: DirectXDynamicTexture,
     depth: Option<ID3D11DepthStencilView>,
 }
 struct GpuState {
     renderer: Option<Renderer>,
-    panels: [Option<Panel>; 3],
+    panels: [Option<Panel>; 4],
     error: Option<String>,
     skin_path: Option<PathBuf>,
     slim: bool,
     time: f32,
+    cnc: [f32; 4],
+    cnc_bounds: Option<Bounds<Pixels>>,
     camera: [f32; 4],
     capture: Option<PathBuf>,
-    captured: [bool; 3],
+    captured: [bool; 4],
     frame_cpu_ms: f64,
     samples: Vec<f64>,
     adapter: String,
 }
 impl GpuState {
     fn paint(&mut self, index: usize, bounds: Bounds<Pixels>, window: &mut Window) -> Result<()> {
+        if index == 3 {
+            self.cnc_bounds = Some(bounds);
+        }
         if self.error.is_some() {
             return Ok(());
         }
@@ -51,7 +73,7 @@ impl GpuState {
             .as_ref()
             .is_none_or(|p| p.target.size() != dimensions || !p.target.is_current());
         if self.panels.iter().flatten().any(|p| !p.target.is_current()) {
-            self.panels = [None, None, None];
+            self.panels = [None, None, None, None];
             self.renderer = None;
         }
         if recreate || self.panels[index].is_none() {
@@ -84,14 +106,17 @@ impl GpuState {
                     size: dimensions,
                     mode: index,
                     time: self.time,
-                    camera: self.camera,
+                    camera: if index == 3 { self.cnc } else { self.camera },
                 },
                 panel.depth.as_ref(),
             )?;
             Ok(target.clone())
         })?;
+        if index == 0 || index == 3 {
+            self.frame_cpu_ms = 0.;
+        }
         self.frame_cpu_ms += start.elapsed().as_secs_f64() * 1000.;
-        if index == 2 {
+        if index == 2 || index == 3 {
             if self.samples.len() < 100_000 {
                 self.samples.push(self.frame_cpu_ms);
             }
@@ -104,7 +129,7 @@ impl GpuState {
             renderer::capture(
                 &renderer.device,
                 &target,
-                &directory.join(["shader.png", "model.png", "particles.png"][index]),
+                &directory.join(["shader.png", "model.png", "particles.png", "cnc.png"][index]),
             )?;
             self.captured[index] = true;
         }
@@ -114,8 +139,10 @@ impl GpuState {
 struct Gallery {
     gpu: Rc<RefCell<GpuState>>,
     last: Instant,
+    animating: bool,
     paused: bool,
     focus: FocusHandle,
+    motion: Motion,
     dragging: bool,
     previous: gpui::Point<Pixels>,
     frame_limit: Option<usize>,
@@ -197,10 +224,15 @@ impl Gallery {
                 .copied()
                 .unwrap_or(0.)
         };
-        let report = serde_json::json!({"adapter":gpu.adapter,"backend":"D3D11", "viewports":3,
+        let indices: &[usize] = match self.motion.page {
+            Page::Scenes => &[0, 1, 2],
+            Page::Cnc => &[3],
+            Page::Flat => &[],
+        };
+        let report = serde_json::json!({"adapter":gpu.adapter,"backend":"D3D11", "viewports":indices.len(), "page":format!("{:?}",self.motion.page),
             "frames":self.frames,"samples_after_warmup":samples.len(),"cpu_record_submit_ms_p50":p(0.5),"cpu_record_submit_ms_p95":p(0.95),
-            "note":"CPU record+submit for three viewports; excludes GPU execution, GPUI composition and present. No backend comparison.",
-            "sizes_physical":gpu.panels.iter().map(|p|p.as_ref().map(|p|[p.target.size().width.0,p.target.size().height.0])).collect::<Vec<_>>(),
+            "note":"CPU record+submit for the selected page's GPU viewports; excludes GPU execution, GPUI composition and present. No backend comparison.",
+            "sizes_physical":indices.iter().map(|&index|gpu.panels[index].as_ref().map(|p|[p.target.size().width.0,p.target.size().height.0])).collect::<Vec<_>>(),
             "error":gpu.error});
         eprintln!("{}", serde_json::to_string_pretty(&report).unwrap());
         if let Some(path) = &self.report {
@@ -211,8 +243,31 @@ impl Gallery {
 impl Render for Gallery {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let now = Instant::now();
+        let dt = if self.animating {
+            now.duration_since(self.last).as_secs_f32().min(0.05)
+        } else {
+            0.
+        };
+        let reduced = cx.reduce_motion();
+        let mut animate = false;
         if !self.paused {
-            self.gpu.borrow_mut().time += now.duration_since(self.last).as_secs_f32().min(0.1);
+            animate = self.motion.tick(dt, reduced);
+            if !reduced
+                && (self.motion.page == Page::Scenes
+                    || (self.motion.page == Page::Cnc && self.motion.power.value > 0.001))
+            {
+                self.gpu.borrow_mut().time += dt;
+                animate = true;
+            }
+        }
+        self.gpu.borrow_mut().cnc = [
+            self.motion.dial.value,
+            self.motion.feed.value,
+            self.motion.power.value,
+            self.motion.press.value,
+        ];
+        self.animating = animate;
+        if animate || self.frame_limit.is_some() {
             window.request_animation_frame();
         }
         self.last = now;
@@ -221,13 +276,11 @@ impl Render for Gallery {
             cx.quit();
         }
         self.frames += 1;
+        if self.motion.page != Page::Scenes {
+            return self.study_page(cx).into_any_element();
+        }
         let gpu = self.gpu.borrow();
         let error = gpu.error.clone();
-        let model_label = if gpu.slim {
-            "Model: Slim / 3px"
-        } else {
-            "Model: Classic / 4px"
-        };
         let adapter = if gpu.adapter.is_empty() {
             "Initializing GPU".to_owned()
         } else {
@@ -239,16 +292,9 @@ impl Render for Gallery {
         } else {
             "Pause / Space"
         };
-        div().track_focus(&self.focus).key_context("GpuGallery").on_action(cx.listener(Self::toggle)).on_action(cx.listener(Self::reset))
+        self.root(cx)
             .size_full().flex().bg(rgb(0x0b1019)).text_color(rgb(0xe5eaf1)).font_family("Segoe UI").text_sm()
-            .child(div().w(px(174.)).h_full().flex().flex_col().p_5().gap_6().border_r_1().border_color(rgb(0x202937))
-                .child(div().text_lg().font_weight(gpui::FontWeight::BOLD).child("GPUI / LAB"))
-                .child(muted("RENDER EXPLORER"))
-                .child(div().px_3().py_3().rounded_lg().bg(rgb(0x222f31)).text_color(rgb(0xc4e99a)).child("01   GPU gallery"))
-                .child(muted("Shader fields")).child(div().id("model-type").cursor_pointer().text_color(rgb(0xc4e99a)).child(model_label)
-                    .on_click(cx.listener(|this,_,_,cx| { let mut gpu=this.gpu.borrow_mut(); gpu.slim = !gpu.slim; gpu.panels=[None,None,None];gpu.renderer=None;drop(gpu);cx.notify(); }))).child(muted("Particle motion"))
-                .child(div().flex_1()).child(muted("FORK BASE"))
-                .child(div().child("GPUI Fast 0.1.17")))
+            .child(self.sidebar(cx))
             .child(div().flex_1().min_w_0().h_full().flex().flex_col().p_6().gap_4()
                 .child(div().flex().items_center().justify_between()
                     .child(div().flex().flex_col().gap_2().child(muted("EXPERIMENTS / NATIVE GRAPHICS"))
@@ -293,7 +339,7 @@ impl Render for Gallery {
                 .child(div().flex().items_center().justify_between().text_xs().text_color(rgb(0x8f9aa9))
                     .child(if adapter.is_empty() {"Initializing graphics device...".to_owned()} else {format!("D3D11 / {adapter}")})
                     .child("SPACE  Play / Pause     R  Reset camera"))
-                .when_some(error,|this,error|this.child(div().text_color(rgb(0xffb4ab)).child(error))))
+                .when_some(error,|this,error|this.child(div().text_color(rgb(0xffb4ab)).child(error)))).into_any_element()
     }
 }
 
@@ -313,12 +359,24 @@ pub fn run() {
             .expect("--frames needs a positive integer")
     });
     let report = value("--report").map(PathBuf::from);
+    let page = match value("--page").as_deref() {
+        Some("cnc") => Page::Cnc,
+        Some("flat") => Page::Flat,
+        Some("scenes") | None => Page::Scenes,
+        Some(other) => panic!("unknown --page {other}; use scenes, cnc or flat"),
+    };
     let paused = args.iter().any(|a| a == "--paused");
     gpui_platform::application().run(move |cx: &mut App| {
         let paused = paused || cx.reduce_motion();
         cx.bind_keys([
             gpui::KeyBinding::new("space", TogglePlayback, Some("GpuGallery")),
             gpui::KeyBinding::new("r", ResetCamera, Some("GpuGallery")),
+            gpui::KeyBinding::new("1", ShowScenes, Some("GpuGallery")),
+            gpui::KeyBinding::new("2", ShowCnc, Some("GpuGallery")),
+            gpui::KeyBinding::new("3", ShowFlat, Some("GpuGallery")),
+            gpui::KeyBinding::new("enter", Primary, Some("GpuGallery")),
+            gpui::KeyBinding::new("left", Previous, Some("GpuGallery")),
+            gpui::KeyBinding::new("right", Next, Some("GpuGallery")),
         ]);
         let initial_bounds = Bounds::centered(None, size(px(1180.), px(760.)), cx);
         let minimum_size = initial_bounds.size.min(&size(px(1100.), px(680.)));
@@ -340,21 +398,25 @@ pub fn run() {
                         Gallery {
                             gpu: Rc::new(RefCell::new(GpuState {
                                 renderer: None,
-                                panels: [None, None, None],
+                                panels: [None, None, None, None],
                                 error: None,
                                 skin_path,
                                 slim,
                                 time: 2.4,
+                                cnc: [0.58, 0.64, 1., 0.],
+                                cnc_bounds: None,
                                 camera: [-0.48, -0.16, 1., 1.],
                                 capture,
-                                captured: [false; 3],
+                                captured: [false; 4],
                                 frame_cpu_ms: 0.,
                                 samples: Vec::new(),
                                 adapter: String::new(),
                             })),
                             last: Instant::now(),
+                            animating: false,
                             paused,
                             focus,
+                            motion: Motion::new(page),
                             dragging: false,
                             previous: point(px(0.), px(0.)),
                             frame_limit,
@@ -382,21 +444,25 @@ fn playback_and_camera_callbacks_work_outside_paint(cx: &mut gpui::TestAppContex
     let handle = cx.add_window(|_, cx| Gallery {
         gpu: Rc::new(RefCell::new(GpuState {
             renderer: None,
-            panels: [None, None, None],
+            panels: [None, None, None, None],
             error: None,
             time: 2.4,
+            cnc: [0.58, 0.64, 1., 0.],
+            cnc_bounds: None,
             skin_path: None,
             slim: false,
             camera: [0.8, 0.3, 1.4, 1.],
             capture: None,
-            captured: [false; 3],
+            captured: [false; 4],
             frame_cpu_ms: 0.,
             samples: Vec::new(),
             adapter: String::new(),
         })),
         last: Instant::now(),
+        animating: false,
         paused: false,
         focus: cx.focus_handle(),
+        motion: Motion::default(),
         dragging: false,
         previous: point(px(0.), px(0.)),
         frame_limit: None,
@@ -415,6 +481,22 @@ fn playback_and_camera_callbacks_work_outside_paint(cx: &mut gpui::TestAppContex
             assert_eq!(gallery.gpu.borrow().camera, [-0.48, -0.16, 1., 1.]);
             gallery.toggle(&TogglePlayback, window, cx);
             assert!(!gallery.paused);
+            gallery.select_page(Page::Cnc, cx);
+            gallery.gpu.borrow_mut().cnc_bounds =
+                Some(Bounds::new(point(px(0.), px(0.)), size(px(900.), px(500.))));
+            gallery.motion.drag = Some(motion::Drag::Feed);
+            gallery.drag_control(point(px(812.), px(317.)), cx);
+            assert_eq!(gallery.motion.feed.target, 1.);
+            gallery.drag_control(point(px(-100.), px(317.)), cx);
+            assert_eq!(gallery.motion.feed.target, 0.);
+            gallery.toggle(&TogglePlayback, window, cx);
+            gallery.activate(cx);
+            assert_eq!(gallery.motion.power.value, 0.);
+            gallery.select_page(Page::Flat, cx);
+            gallery.activate(cx);
+            assert!(gallery.motion.job.is_some());
+            gallery.activate(cx);
+            assert!(gallery.motion.job.is_none());
         })
         .unwrap();
 }

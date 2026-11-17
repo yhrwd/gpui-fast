@@ -24,6 +24,7 @@ pub struct Renderer {
     pub device: ID3D11Device,
     screen: ID3D11VertexShader,
     field: ID3D11PixelShader,
+    cnc: ID3D11PixelShader,
     model: ID3D11VertexShader,
     lighting: ID3D11PixelShader,
     particles: ID3D11VertexShader,
@@ -40,7 +41,11 @@ pub struct Renderer {
 }
 
 fn shader(entry: &str, profile: &str) -> Result<Vec<u8>> {
-    let source = include_bytes!("gallery.hlsl");
+    let source: &[u8] = if entry == "CncPS" {
+        include_bytes!("cnc.hlsl")
+    } else {
+        include_bytes!("gallery.hlsl")
+    };
     let entry = CString::new(entry)?;
     let profile = CString::new(profile)?;
     let mut code = None;
@@ -83,6 +88,7 @@ impl Renderer {
         unsafe {
             let mut screen = None;
             let mut field = None;
+            let mut cnc = None;
             let mut model = None;
             let mut lighting = None;
             let mut particles = None;
@@ -90,6 +96,7 @@ impl Renderer {
             let model_code = shader("ModelVS", "vs_5_0")?;
             device.CreateVertexShader(&shader("ScreenVS", "vs_5_0")?, None, Some(&mut screen))?;
             device.CreatePixelShader(&shader("FieldPS", "ps_5_0")?, None, Some(&mut field))?;
+            device.CreatePixelShader(&shader("CncPS", "ps_5_0")?, None, Some(&mut cnc))?;
             device.CreateVertexShader(&model_code, None, Some(&mut model))?;
             device.CreatePixelShader(&shader("ModelPS", "ps_5_0")?, None, Some(&mut lighting))?;
             device.CreateVertexShader(
@@ -250,6 +257,7 @@ impl Renderer {
                 device: device.clone(),
                 screen: screen.unwrap(),
                 field: field.unwrap(),
+                cnc: cnc.unwrap(),
                 model: model.unwrap(),
                 lighting: lighting.unwrap(),
                 particles: particles.unwrap(),
@@ -378,6 +386,11 @@ impl Renderer {
                     context.VSSetShader(&self.model, None);
                     context.PSSetShader(&self.lighting, None);
                     context.Draw(self.vertex_count, 0);
+                }
+                3 => {
+                    context.VSSetShader(&self.screen, None);
+                    context.PSSetShader(&self.cnc, None);
+                    context.Draw(3, 0);
                 }
                 _ => {
                     context.OMSetBlendState(&self.blend, None, u32::MAX);
@@ -515,4 +528,14 @@ fn skin_meshes_have_uvs_layers_and_distinct_arm_widths() -> Result<()> {
     assert!((arm_width(&classic) - 0.28).abs() < 0.0001);
     assert!((arm_width(&slim) - 0.21).abs() < 0.0001);
     Ok(())
+}
+
+#[cfg(test)]
+#[test]
+fn cnc_material_shader_compiles() {
+    assert!(
+        !shader("CncPS", "ps_5_0")
+            .expect("compile CNC material")
+            .is_empty()
+    );
 }
