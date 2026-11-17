@@ -1,0 +1,33 @@
+[package]
+name = "hhmmcl-gpu-gallery"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+
+# Standalone demo manifest: builds the gallery against the pinned gpui-fast Git revision.
+[workspace]
+resolver = "2"
+
+[[bin]]
+name = "gpu_gallery"
+path = "examples/gpu_gallery.rs"
+
+[target.'cfg(windows)'.dependencies]
+gpui_fast = { package = "gpui-fast", git = "https://github.com/yhrwd/gpui-fast.git", rev = "bfc8d43b9f2a4dab46015681457015d001a938f2", default-features = false, features = ["windows-manifest"] }
+gpui_platform_fast = { package = "gpui-fast-platform", git = "https://github.com/yhrwd/gpui-fast.git", rev = "bfc8d43b9f2a4dab46015681457015d001a938f2", default-features = false }
+gpui_windows = { package = "gpui-fast-windows", git = "https://github.com/yhrwd/gpui-fast.git", rev = "bfc8d43b9f2a4dab46015681457015d001a938f2", default-features = false }
+anyhow = "1"
+serde_json = "1"
+image = { version = "0.25", default-features = false, features = ["png"] }
+tobj = { version = "4", default-features = false }
+windows = { version = "0.62.2", features = ["Win32_Graphics_Direct3D11", "Win32_Graphics_Direct3D_Fxc", "Win32_Graphics_Dxgi_Common"] }
+
+[target.'cfg(windows)'.dev-dependencies]
+gpui_fast = { package = "gpui-fast", git = "https://github.com/yhrwd/gpui-fast.git", rev = "bfc8d43b9f2a4dab46015681457015d001a938f2", default-features = false, features = ["test-support"] }
+
+[profile.dev]
+debug = 0
+
+[profile.test]
+debug = 0
