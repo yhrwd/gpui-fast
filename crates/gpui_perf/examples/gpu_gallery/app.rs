@@ -320,14 +320,13 @@ pub fn run() {
             gpui::KeyBinding::new("space", TogglePlayback, Some("GpuGallery")),
             gpui::KeyBinding::new("r", ResetCamera, Some("GpuGallery")),
         ]);
+        let initial_bounds = Bounds::centered(None, size(px(1180.), px(760.)), cx);
+        let minimum_size = initial_bounds.size.min(&size(px(1100.), px(680.)));
         let handle = cx
             .open_window(
                 WindowOptions {
-                    window_bounds: Some(WindowBounds::Windowed(Bounds::new(
-                        point(px(70.), px(60.)),
-                        size(px(1280.), px(860.)),
-                    ))),
-                    window_min_size: Some(size(px(1100.), px(740.))),
+                    window_bounds: Some(WindowBounds::Windowed(initial_bounds)),
+                    window_min_size: Some(minimum_size),
                     titlebar: Some(gpui::TitlebarOptions {
                         title: Some("GPUI GPU Gallery".into()),
                         ..Default::default()
