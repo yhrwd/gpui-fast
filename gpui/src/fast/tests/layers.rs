@@ -2832,6 +2832,53 @@ mod policies {
         }
     }
 
+    /// Smooth scrolling eases a container's offset over frames, asking for a
+    /// scroll ease frame from prepaint on each (see
+    /// [`crate::Window::request_scroll_ease_frame`]). The easing moves the
+    /// container's offset, not its content: the layer composites at the
+    /// eased offset, as it does for a scrollbar drag, instead of being
+    /// bypassed for an animation and dropped with a doubling retry cooldown.
+    #[crate::test]
+    fn eased_smooth_scrolling_composites(cx: &mut TestAppContext) {
+        if !crate::fast::layers::COMPILED {
+            return;
+        }
+        let handle = page(cx, false);
+        let window = handle.into();
+        // The easing wrapper, in the content from the start so that adding
+        // it is not a change of a painted layer's content: each frame it
+        // asks for a scroll ease frame.
+        with_extra(cx, handle, || {
+            canvas(
+                |_, window, _| window.request_scroll_ease_frame(),
+                |_, _, _, _| {},
+            )
+            .h(px(10.))
+            .into_any_element()
+        });
+        promote(cx, window);
+        // Each frame eases the offset and notifies the view, as the easing
+        // does.
+        for step in 0..12 {
+            frame_after(cx, window, |cx| {
+                handle
+                    .update(cx, |page, _, cx| {
+                        let offset = page.handle.offset();
+                        page.handle.set_offset(point(offset.x, offset.y - px(3.)));
+                        cx.notify();
+                    })
+                    .unwrap();
+            });
+            assert_eq!(
+                decision(cx, window),
+                Some(Decision::Composite),
+                "step {step}"
+            );
+        }
+        assert!(has_record(cx, window));
+        assert_eq!(layers_demoted(cx, window), 0);
+    }
+
     #[crate::test]
     fn a_focused_input_inside_makes_it_ineligible(cx: &mut TestAppContext) {
         if !crate::fast::layers::COMPILED {

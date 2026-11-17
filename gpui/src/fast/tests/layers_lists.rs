@@ -246,6 +246,12 @@ mod uniform {
         tint: bool,
         background: crate::Hsla,
         pub(super) rendered: Rc<RefCell<Vec<Range<usize>>>>,
+        /// The list's scroll handle, for tests that ease the offset
+        /// programmatically, as smooth scrolling does.
+        pub(super) scroll: crate::UniformListScrollHandle,
+        /// An extra element beside the list, for tests that drive it from
+        /// prepaint.
+        pub(super) extra: Option<Rc<dyn Fn() -> crate::AnyElement>>,
     }
 
     impl Render for UniformPage {
@@ -253,7 +259,7 @@ mod uniform {
             let rendered = self.rendered.clone();
             let row_height = self.row_height;
             let tint = self.tint;
-            div().size_full().bg(self.background).child(
+            let mut panel = div().size_full().bg(self.background).child(
                 crate::uniform_list(
                     "list",
                     self.count,
@@ -270,9 +276,14 @@ mod uniform {
                             .collect::<Vec<_>>()
                     }),
                 )
+                .track_scroll(&self.scroll)
                 .w(px(VIEWPORT_WIDTH))
                 .h(px(VIEWPORT_HEIGHT)),
-            )
+            );
+            if let Some(extra) = &self.extra {
+                panel = panel.child(extra());
+            }
+            panel
         }
     }
 
@@ -297,6 +308,8 @@ mod uniform {
             tint: false,
             background: rgb(0xffffff).into(),
             rendered: log,
+            scroll: crate::UniformListScrollHandle::new(),
+            extra: None,
         });
         open_at(cx, window.into(), scale_factor);
         (window, rendered)
@@ -487,6 +500,75 @@ mod uniform {
         }
         wheel(cx, window, -ROW_HEIGHT);
         assert_eq!(decision(cx, window), Some(Decision::Composite));
+        assert_eq!(
+            with_window(cx, window, |window, _| window.layout_stats().layers_demoted),
+            0
+        );
+    }
+
+    /// Smooth scrolling eases a list's offset over frames, asking for a
+    /// scroll ease frame from prepaint on each (see
+    /// [`crate::Window::request_scroll_ease_frame`]). The easing moves the
+    /// list's offset, not its content: the layer composites the rows it
+    /// holds at the eased offset, rendering at most those a frame uncovers,
+    /// and is neither bypassed nor demoted for the easing.
+    #[crate::test]
+    fn eased_smooth_scrolling_composites(cx: &mut TestAppContext) {
+        if !crate::fast::layers::COMPILED {
+            return;
+        }
+        let (handle, log) = page(cx, 1000);
+        let window = handle.into();
+        // The easing wrapper, beside the list from the start so that adding
+        // it is not a change of a painted layer's content: each frame it
+        // asks for a scroll ease frame.
+        let list_scroll = handle
+            .update(cx, |page, _, _| {
+                let scroll = page.scroll.0.borrow().base_handle.clone();
+                page.extra = Some(Rc::new(move || {
+                    crate::canvas(
+                        |_, window, _| window.request_scroll_ease_frame(),
+                        |_, _, _, _| {},
+                    )
+                    .h(px(1.))
+                    .into_any_element()
+                }));
+                scroll
+            })
+            .unwrap();
+        promote(cx, window);
+        // Each frame eases the offset and notifies the view, as the easing
+        // does.
+        let mut quiet_frames = 0;
+        for step in 0..12 {
+            // The frame that follows the eased offset and its notification,
+            // unless the notification drew it.
+            let frame = with_window(cx, window, |window, _| window.fast_layers.frame);
+            let offset = list_scroll.offset();
+            list_scroll.set_offset(crate::point(offset.x, offset.y - px(3.)));
+            handle.update(cx, |_, _, cx| cx.notify()).unwrap();
+            if with_window(cx, window, |window, _| window.fast_layers.frame) == frame {
+                draw(cx, window);
+            }
+            assert_eq!(
+                decision(cx, window),
+                Some(Decision::Composite),
+                "step {step}"
+            );
+            // A frame that only eased composites the rows it holds; it
+            // renders rows afresh only when it uncovers one.
+            let rendered: usize = rendered_rows(&log).iter().map(|rows| rows.len()).sum();
+            if rendered == 0 {
+                quiet_frames += 1;
+            }
+        }
+        // Twelve steps of 3 px cross one row boundary; every other frame
+        // keeps the rows it held. Rendering them afresh each frame, as an
+        // unattributed easing notification would, fails this.
+        assert!(
+            quiet_frames >= 10,
+            "eased frames composite held rows: {quiet_frames}/12 quiet"
+        );
         assert_eq!(
             with_window(cx, window, |window, _| window.layout_stats().layers_demoted),
             0

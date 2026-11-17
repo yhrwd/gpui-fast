@@ -3059,6 +3059,34 @@ impl Window {
         self.on_next_frame(move |_, cx| cx.notify(entity));
     }
 
+    /// Schedules a frame that eases a scroll container's own offset (gpui-fast
+    /// extension, for smooth scrolling that drives a `ScrollHandle` itself).
+    ///
+    /// Like [`Self::request_animation_frame`], it notifies the view current
+    /// when it is asked for on the next frame, so call it from where the
+    /// easing runs, right after it set the offset it moves toward.
+    ///
+    /// Unlike [`Self::request_animation_frame`], it does not record an
+    /// animation-frame request against the element being drawn. What the
+    /// easing animates is the container's offset, not its content: the layers
+    /// already take the set offset in as one notification for the scroll
+    /// ([`crate::fast::layers::invalidate::ScrollLog::take_offsets_set`]),
+    /// which balances this one, and composite the layer at the new offset. A
+    /// recorded request would instead make every eased frame ineligible
+    /// ([`crate::fast::layers::policy::eligible`] treats anything inside the
+    /// container that asks for animation frames as content that changes every
+    /// frame), dropping the layer with a doubling retry cooldown and
+    /// defeating the tile cache for as long as the easing runs.
+    ///
+    /// Only easing that moves a container's offset belongs here. An element
+    /// whose pixels change while the offset eases — a spinner in a row, say —
+    /// still asks through [`Self::request_animation_frame`], which keeps its
+    /// container off its layer while it runs.
+    pub fn request_scroll_ease_frame(&self) {
+        let entity = self.current_view();
+        self.on_next_frame(move |_, cx| cx.notify(entity));
+    }
+
     /// Runs all callbacks scheduled via [`Self::on_next_frame`], returning how many ran.
     ///
     /// Tests have no platform frame loop, so this simulates the delivery of the
