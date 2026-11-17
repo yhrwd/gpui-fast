@@ -1,8 +1,9 @@
 # HHMMCL GPUI Fast 0.1.17 distribution
 
+> **HHMMCL fork · GPUI Fast 0.1.17** — 新增 Windows 同设备 GPU 渲染接口。改造内容及示例路径见[中文说明](docs/hhmmcl-fork.md)／[English](docs/gpu-viewport.md)。
+
 This branch contains Cargo-consumable release crates generated from the source branch
 `hhmmcl/gpu-viewport`, revision `aa50f04dece8e1f14e63f72e496b9271ab9597bc`.
-The source branch remains the place to develop and review changes.
 
 The repository's existing `script/prepare-release.ts --tag v0.1.17` normalizes the
 package names to `gpui-fast*`, links the nine sibling crates by local paths, and
@@ -17,8 +18,10 @@ Consumers should use the Git repository and pin a full revision of this distribu
 branch, with `package = "gpui-fast"` and `package = "gpui-fast-platform"`.
 Use the dependency key `gpui` to preserve macro expansion paths.
 
-Regenerate this branch using the existing release preparation workflow in the source
-checkout, then commit the generated workspace as this distribution branch's tree.
-Keep source changes on the source branch. This distribution does not add a sync checker.
+The `hhmmcl/gpu-viewport` source branch has been consolidated into this branch:
+its commits are ancestors of this branch's history, and development now happens
+here directly. The HHMMCL additions beyond the generated distribution — the scroll
+layers under `gpui/src/fast/layers/` and `gpui_windows/src/fast/`, and the standalone
+GPU gallery under `compat/gpu-gallery/` — live on this branch.
 
 Distributed under Apache-2.0; see LICENSE and NOTICE.
