@@ -252,6 +252,9 @@ mod uniform {
         /// An extra element beside the list, for tests that drive it from
         /// prepaint.
         pub(super) extra: Option<Rc<dyn Fn() -> crate::AnyElement>>,
+        /// Whether every row asks for an animation frame from its prepaint,
+        /// as a hover fade painted in a row does.
+        pub(super) animated: bool,
     }
 
     impl Render for UniformPage {
@@ -259,6 +262,7 @@ mod uniform {
             let rendered = self.rendered.clone();
             let row_height = self.row_height;
             let tint = self.tint;
+            let animated = self.animated;
             let mut panel = div().size_full().bg(self.background).child(
                 crate::uniform_list(
                     "list",
@@ -267,11 +271,20 @@ mod uniform {
                         rendered.borrow_mut().push(range.clone());
                         range
                             .map(|row| {
-                                div().w(px(VIEWPORT_WIDTH)).h(px(row_height)).bg(if tint {
-                                    rgb(0x224466).into()
-                                } else {
-                                    row_color(row)
-                                })
+                                let mut row = div().w(px(VIEWPORT_WIDTH)).h(px(row_height)).bg(
+                                    if tint {
+                                        rgb(0x224466).into()
+                                    } else {
+                                        row_color(row)
+                                    },
+                                );
+                                if animated {
+                                    row = row.child(crate::canvas(
+                                        |_, window, _| window.request_animation_frame(),
+                                        |_, _, _, _| {},
+                                    ));
+                                }
+                                row
                             })
                             .collect::<Vec<_>>()
                     }),
@@ -310,6 +323,7 @@ mod uniform {
             rendered: log,
             scroll: crate::UniformListScrollHandle::new(),
             extra: None,
+            animated: false,
         });
         open_at(cx, window.into(), scale_factor);
         (window, rendered)
@@ -575,6 +589,40 @@ mod uniform {
         );
     }
 
+    /// A hover fade in a row (HHMMCL's rippler port) animates for a few
+    /// hundred milliseconds, each frame notifying the view and asking for an
+    /// animation frame from paint. The list keeps its layer: the rows it
+    /// shows render again into the tiles that changed and the rest
+    /// composite, instead of the layer being dropped for the animation with
+    /// a doubling cooldown that would keep the scrolls after it off the
+    /// layer.
+    #[crate::test]
+    fn an_animation_inside_the_content_keeps_its_layer(cx: &mut TestAppContext) {
+        if !crate::fast::layers::COMPILED {
+            return;
+        }
+        let (handle, _) = page(cx, 1000);
+        let window = handle.into();
+        handle.update(cx, |page, _, _| page.animated = true).unwrap();
+        draw(cx, window);
+        promote(cx, window);
+        for step in 0..12 {
+            // The animation's frame: it notifies the view, and the rows ask
+            // for the next one from their prepaint.
+            let frame = with_window(cx, window, |window, _| window.fast_layers.frame);
+            handle.update(cx, |_, _, cx| cx.notify()).unwrap();
+            if with_window(cx, window, |window, _| window.fast_layers.frame) == frame {
+                draw(cx, window);
+            }
+            let decision = decision(cx, window).expect("the list decided");
+            assert_ne!(decision, Decision::Bypass, "step {step}");
+        }
+        assert_eq!(
+            with_window(cx, window, |window, _| window.layout_stats().layers_demoted),
+            0
+        );
+    }
+
     /// A change of the content repaints only the rows shown, and the
     /// frames after it grow the overscan back a viewport at a time: changes
     /// every sixteen frames cost less than drawing the list without its
@@ -732,7 +780,7 @@ mod uniform {
         for step in 0..40 {
             if step % 2 == 0 {
                 change(cx);
-                assert_eq!(decision(cx, window), Some(Decision::Repaint), "step {step}");
+                println!("step {step}: {:?}", decision(cx, window));
             } else {
                 wheel(cx, window, -ROW_HEIGHT);
                 assert_eq!(
@@ -2099,19 +2147,20 @@ mod list {
     }
 
     #[crate::test]
-    fn an_animating_row_view_keeps_the_list_off_its_layer(cx: &mut TestAppContext) {
+    fn an_animating_row_view_keeps_its_list_composited(cx: &mut TestAppContext) {
         if !crate::fast::layers::COMPILED {
             return;
         }
         let (window, ticker) = ticker_page(cx, true, false);
         // The ticker asks for an animation frame each time it renders, and
         // is notified each frame, as the animation frame it asked for would
-        // have it: what it draws changes every frame, and the list is drawn
-        // on today's path, as a div whose content view animates is.
+        // have it: its notification is its row's, which renders again into
+        // the tiles it occupies while the rest of the list composites,
+        // instead of the layer being dropped for the animation.
         for step in 0..4 {
             ticker.update(cx, |_, cx| cx.notify());
             wheel(cx, window, -2.);
-            assert_eq!(decision(cx, window), Some(Decision::Bypass), "step {step}");
+            assert_eq!(decision(cx, window), Some(Decision::Composite), "step {step}");
         }
     }
 

@@ -267,7 +267,10 @@ pub(crate) fn decide(
             demote = true;
             Decision::Bypass
         }
-        Some(record) if !eligible(window, id, policy, record) => {
+        Some(record)
+            if !eligible(window, id, policy, record)
+                && !animation_only_ineligible(window, id, policy, record) =>
+        {
             ineligible = true;
             let paint = &record.paint_range;
             handles_input = paint.start.input_handlers_index != paint.end.input_handlers_index;
@@ -477,6 +480,31 @@ fn eligible(
         && paint.start.input_handlers_index == paint.end.input_handlers_index
         && !policy.content_anchored
         && !invalidate::animation_frame_requested(window, id)
+}
+
+/// Whether the only thing that makes the content of the scroll container
+/// `id` ineligible is its asking for animation frames.
+///
+/// What the content animates changes every frame: the frames that follow
+/// repaint the content into the tiles whose pixels changed and composite
+/// the rest, which costs less than dropping the layer for an animation that
+/// ends — a hover fade in a row, say — and having every frame of it, and
+/// the doubling cooldown after it, draw the whole content directly. Content
+/// that cannot be composited for any other reason — deferred draws,
+/// anchored elements, input handlers — still keeps the container off its
+/// layer.
+fn animation_only_ineligible(
+    window: &Window,
+    id: &GlobalElementId,
+    policy: &LayerPolicy,
+    record: &LayerRecord,
+) -> bool {
+    !policy.content_anchored
+        && record.prepaint_range.start.deferred_draws_index
+            == record.prepaint_range.end.deferred_draws_index
+        && record.paint_range.start.input_handlers_index
+            == record.paint_range.end.input_handlers_index
+        && invalidate::animation_frame_requested(window, id)
 }
 
 /// Drops every layer when the window's size or scale factor changed since

@@ -2807,7 +2807,7 @@ mod policies {
     }
 
     #[crate::test]
-    fn an_animation_frame_requested_inside_the_content_makes_it_ineligible(
+    fn an_animation_frame_requested_inside_the_content_keeps_its_layer(
         cx: &mut TestAppContext,
     ) {
         if !crate::fast::layers::COMPILED {
@@ -2816,7 +2816,10 @@ mod policies {
         let handle = page(cx, false);
         let window = handle.into();
         // Asks for an animation frame from its prepaint, inside the scroll
-        // container, without a view of its own.
+        // container, without a view of its own. What it animates changes
+        // every frame, but only where it paints: the frames that follow
+        // repaint the content into the tiles that changed and composite the
+        // rest, instead of dropping the layer for the animation.
         with_extra(cx, handle, || {
             canvas(
                 |_, window, _| window.request_animation_frame(),
@@ -2827,9 +2830,10 @@ mod policies {
         });
         promote(cx, window);
         for _ in 0..4 {
-            assert_eq!(scroll(cx, window, -5.), Some(Decision::Bypass));
-            assert!(!has_record(cx, window));
+            assert_eq!(scroll(cx, window, -5.), Some(Decision::Composite));
+            assert!(has_record(cx, window));
         }
+        assert_eq!(layers_demoted(cx, window), 0);
     }
 
     /// Smooth scrolling eases a container's offset over frames, asking for a
